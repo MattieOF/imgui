@@ -20,7 +20,7 @@
 
 // CHANGELOG
 // (minor and older changes stripped away, please see git history for details)
-//  2022-XX-XX: Platform: Added support for multiple windows via the ImGuiPlatformIO interface.
+//  2023-XX-XX: Platform: Added support for multiple windows via the ImGuiPlatformIO interface.
 //  2022-10-11: Using 'nullptr' instead of 'NULL' as per our switch to C++11.
 //  2022-09-26: Inputs: Disable SDL 2.0.22 new "auto capture" (SDL_HINT_MOUSE_AUTO_CAPTURE) which prevents drag and drop across windows for multi-viewport support + don't capture when drag and dropping. (#5710)
 //  2022-09-26: Inputs: Renamed ImGuiKey_ModXXX introduced in 1.87 to ImGuiMod_XXX (old names still supported).
@@ -103,6 +103,7 @@ struct ImGui_ImplSDL2_Data
     int             PendingMouseLeaveFrame;
     char*           ClipboardTextData;
     bool            MouseCanUseGlobalState;
+    bool            MouseCanReportHoveredViewport;  // This is hard to use/unreliable on SDL so we'll set ImGuiBackendFlags_HasMouseHoveredViewport dynamically based on state.
     bool            UseVulkan;
 
     ImGui_ImplSDL2_Data()   { memset((void*)this, 0, sizeof(*this)); }
@@ -381,15 +382,17 @@ static bool ImGui_ImplSDL2_Init(SDL_Window* window, SDL_Renderer* renderer, void
     if (mouse_can_use_global_state)
         io.BackendFlags |= ImGuiBackendFlags_PlatformHasViewports;  // We can create multi-viewports on the Platform side (optional)
 
-    // SDL on Linux/OSX doesn't report events for unfocused windows (see https://github.com/ocornut/imgui/issues/4960)
-#ifndef __APPLE__
-    if (mouse_can_use_global_state)
-        io.BackendFlags |= ImGuiBackendFlags_HasMouseHoveredViewport;// We can call io.AddMouseViewportEvent() with correct data (optional)
-#endif
-
     bd->Window = window;
     bd->Renderer = renderer;
+
+    // SDL on Linux/OSX doesn't report events for unfocused windows (see https://github.com/ocornut/imgui/issues/4960)
+    // We will use 'MouseCanReportHoveredViewport' to set 'ImGuiBackendFlags_HasMouseHoveredViewport' dynamically each frame.
     bd->MouseCanUseGlobalState = mouse_can_use_global_state;
+#ifndef __APPLE__
+    bd->MouseCanReportHoveredViewport = bd->MouseCanUseGlobalState;
+#else
+    bd->MouseCanReportHoveredViewport = false;
+#endif
 
     io.SetClipboardTextFn = ImGui_ImplSDL2_SetClipboardText;
     io.GetClipboardTextFn = ImGui_ImplSDL2_GetClipboardText;
@@ -415,7 +418,7 @@ static bool ImGui_ImplSDL2_Init(SDL_Window* window, SDL_Renderer* renderer, void
     SDL_VERSION(&info.version);
     if (SDL_GetWindowWMInfo(window, &info))
     {
-#ifdef _WIN32
+#if defined(SDL_VIDEO_DRIVER_WINDOWS)
         main_viewport->PlatformHandleRaw = (void*)info.info.win.window;
 #elif defined(__APPLE__) && defined(SDL_VIDEO_DRIVER_COCOA)
         main_viewport->PlatformHandleRaw = (void*)info.info.cocoa.window;
@@ -509,7 +512,7 @@ static void ImGui_ImplSDL2_UpdateMouseData()
     // We forward mouse input when hovered or captured (via SDL_MOUSEMOTION) or when focused (below)
 #if SDL_HAS_CAPTURE_AND_GLOBAL_MOUSE
     // SDL_CaptureMouse() let the OS know e.g. that our imgui drag outside the SDL window boundaries shouldn't e.g. trigger other operations outside
-    SDL_CaptureMouse((bd->MouseButtonsDown != 0 && ImGui::GetDragDropPayload() == nullptr) ? SDL_TRUE : SDL_FALSE);
+    SDL_CaptureMouse((bd->MouseButtonsDown != 0) ? SDL_TRUE : SDL_FALSE);
     SDL_Window* focused_window = SDL_GetKeyboardFocus();
     const bool is_app_focused = (focused_window && (bd->Window == focused_window || ImGui::FindViewportByPlatformHandle((void*)focused_window)));
 #else
@@ -694,6 +697,13 @@ void ImGui_ImplSDL2_NewFrame()
         io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
     }
 
+    // Our io.AddMouseViewportEvent() calls will only be valid when not capturing.
+    // Technically speaking testing for 'bd->MouseButtonsDown == 0' would be more rygorous, but testing for payload reduces noise and potential side-effects.
+    if (bd->MouseCanReportHoveredViewport && ImGui::GetDragDropPayload() == nullptr)
+        io.BackendFlags |= ImGuiBackendFlags_HasMouseHoveredViewport;
+    else
+        io.BackendFlags &= ~ImGuiBackendFlags_HasMouseHoveredViewport;
+
     ImGui_ImplSDL2_UpdateMouseData();
     ImGui_ImplSDL2_UpdateMouseCursor();
 
@@ -767,7 +777,7 @@ static void ImGui_ImplSDL2_CreateWindow(ImGuiViewport* viewport)
     SDL_VERSION(&info.version);
     if (SDL_GetWindowWMInfo(vd->Window, &info))
     {
-#if defined(_WIN32)
+#if defined(SDL_VIDEO_DRIVER_WINDOWS)
         viewport->PlatformHandleRaw = info.info.win.window;
 #elif defined(__APPLE__) && defined(SDL_VIDEO_DRIVER_COCOA)
         viewport->PlatformHandleRaw = (void*)info.info.cocoa.window;
